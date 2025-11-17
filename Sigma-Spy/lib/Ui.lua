@@ -42,8 +42,9 @@ local Ui = {
 
     Window = nil,
     RandomSeed = Random.new(tick()),
-	Logs = setmetatable({}, {__mode = "k"}),
-	LogQueue = setmetatable({}, {__mode = "v"}),
+	-- Removed weak tables for reliability
+	Logs = {},
+	LogQueue = {},
 } 
 
 type table = {
@@ -104,8 +105,22 @@ function Ui:Init(Data)
 	Communication = Modules.Communication
 	Files = Modules.Files
 
-	--// ReGui
-    ReGui = loadstring(game:HttpGet(`{Data.Configuration.RepoUrl}/lib/ReGui.lua`), "ReGui")()
+	--// Safe ReGui load (pcall)
+	local ok, result = pcall(function()
+		local url = string.format("%s/lib/ReGui.lua", tostring(Data.Configuration.RepoUrl))
+		local code = game:HttpGet(url)
+		local loader = loadstring(code, "ReGui")
+		if not loader then error("failed to compile ReGui loader") end
+		return loader()
+	end)
+
+	if not ok or not result then
+		-- show a modal later when Window exists; for now try to fallback gracefully
+		warn("Ui:Init - failed to load ReGui: ", tostring(result))
+		return
+	end
+
+	ReGui = result
 	self:LoadFont()
 	self:LoadReGui()
 	self:CheckScale()
@@ -119,14 +134,30 @@ function Ui:CheckScale()
 	local BaseConfig = self.BaseConfig
 	local Scales = self.Scales
 
-	local IsMobile = ReGui:IsMobileDevice()
+	local IsMobile = ReGui and ReGui:IsMobileDevice() or false
 	local Device = IsMobile and "Mobile" or "Desktop"
 
 	BaseConfig.Size = Scales[Device]
 end
 
 function Ui:SetClipboard(Content: string)
-	SetClipboard(Content)
+	if not SetClipboard then
+		-- Show modal if available; otherwise warn
+		if self and self.ShowModal then
+			self:ShowModal({
+				"Clipboard function is not available on this executor.",
+				"Please copy manually:",
+				tostring(Content)
+			})
+		else
+			warn("Clipboard unavailable. Content:\n", tostring(Content))
+		end
+		return false
+	end
+
+	-- Use pcall for safety
+	pcall(function() SetClipboard(Content) end)
+	return true
 end
 
 function Ui:TurnSeasonal(Text: string): string
@@ -134,7 +165,8 @@ function Ui:TurnSeasonal(Text: string): string
     local Month = os.date("%B")
     local Base = SeasonLabels[Month]
 
-    return Base:format(Text)
+    if not Base then return Text end
+    return string.format(Base, Text)
 end
 
 function Ui:LoadFont()
@@ -170,7 +202,9 @@ function Ui:LoadReGui()
 	ThemeConfig.TextFont = TextFont
 
 	--// ReGui
-	ReGui:DefineTheme("SigmaSpy", ThemeConfig)
+	if ReGui then
+		ReGui:DefineTheme("SigmaSpy", ThemeConfig)
+	end
 end
 
 type CreateButtons = {
@@ -252,7 +286,7 @@ function Ui:AskUser(Config: AskConfig): string
 		})
 	end
 
-	repeat wait() until Answered
+	repeat task.wait() until Answered
 	return Answered
 end
 
@@ -294,17 +328,17 @@ function Ui:ShowModal(Lines: table)
 end
 
 function Ui:ShowUnsupportedExecutor(Name: string)
-	Ui:ShowModal({
+	self:ShowModal({
 		"Unfortunately Sigma Spy is not supported on your executor",
 		"The best free option is Swift (discord.gg/getswiftgg)",
-		`\nYour executor: {Name}`
+		"\nYour executor: " .. tostring(Name)
 	})
 end
 
 function Ui:ShowUnsupported(FuncName: string)
-	Ui:ShowModal({
+	self:ShowModal({
 		"Unfortunately Sigma Spy is not supported on your executor",
-		`\nMissing function: {FuncName}`
+		"\nMissing function: " .. tostring(FuncName)
 	})
 end
 
@@ -377,7 +411,7 @@ function Ui:CreateElements(Parent, Options)
 		
 		--// Check if a element type exists for value type
 		local Class = Data.Class
-		assert(Class, `No {Type} type exists for option`)
+		assert(Class, string.format("No %s type exists for option", Type))
 
 		local Container = Table:NextColumn()
 		local Checkbox = nil
@@ -403,19 +437,26 @@ function Ui:DisplayAura()
     local AURADELAY = Rand:NextInteger(1, 5)
 
 	--// Title
-	local Title = `Sigma Spy | AURA: {AURA}`
+	local Title = string.format("Sigma Spy | AURA: %d", AURA)
 	local Seasonal = self:TurnSeasonal(Title)
     Window:SetTitle(Seasonal)
 
-    wait(AURADELAY)
+    task.wait(AURADELAY)
 end
 
 function Ui:AuraCounterService()
-    task.spawn(function()
-        while true do
-            self:DisplayAura()
-        end
-    end)
+	-- Controlled aura service with stop flag
+	self._auraRunning = true
+	task.spawn(function()
+		while self._auraRunning do
+			self:DisplayAura()
+			task.wait()
+		end
+	end)
+end
+
+function Ui:StopAuraCounterService()
+	self._auraRunning = false
 end
 
 function Ui:CreateWindowContent(Window)
@@ -726,7 +767,7 @@ function Ui:EditFile(FilePath: string, InFolder: boolean, OnSaveFunc: ((table, s
 
 	--// Relative to Sigma Spy folder
 	if InFolder then
-		FilePath = `{Folder}/{FilePath}`
+		FilePath = string.format("%s/%s", Folder, FilePath)
 	end
 
 	--// Get file content
@@ -759,7 +800,7 @@ function Ui:EditFile(FilePath: string, InFolder: boolean, OnSaveFunc: ((table, s
 
 	--// Create Editor Window
 	CodeEditor, Window = self:MakeEditorPopoutWindow(Content, {
-		Title = `Editing: {FilePath}`,
+		Title = string.format("Editing: %s", FilePath),
 		Buttons = Buttons
 	})
 end
@@ -824,7 +865,7 @@ function Ui:Decompile(Editor: table, Script: Script)
 
 	--// Add header for successful decompilations
 	if not IsError then
-		Decompiled = `{Header}\n{Decompiled}`
+		Decompiled = string.format("%s\n%s", Header, Decompiled)
 	end
 
 	Editor:SetText(Decompiled)
@@ -864,7 +905,7 @@ function Ui:DisplayTable(Parent, Config: DisplayTableConfig): table
 			if not Value then continue end
 
 			--// Create filtered label
-			local String = self:FilterName(`{Value}`, 150)
+			local String = self:FilterName(string.format("%s", Value), 150)
 			Column:Label({Text=String})
 		end
 	end
@@ -874,7 +915,7 @@ end
 
 function Ui:SetFocusedRemote(Data)
 	--// Unpack remote data
-	local Remote = Data.Remote
+    local Remote = Data.Remote
 	local Method = Data.Method
 	local IsReceive = Data.IsReceive
 	local Script = Data.CallingScript
@@ -891,7 +932,7 @@ function Ui:SetFocusedRemote(Data)
 	--// Unpack info
 	local RemoteData = Process:GetRemoteData(Id)
 	local IsRemoteFunction = ClassData.IsRemoteFunction
-	local RemoteName = self:FilterName(`{Remote}`, 50)
+	local RemoteName = self:FilterName(string.format("%s", Remote), 50)
 
 	--// UI data
 	local CodeEditor = self.CodeEditor
@@ -900,7 +941,7 @@ function Ui:SetFocusedRemote(Data)
 
 	local TabFocused = self:RemovePreviousTab()
 	local Tab = InfoSelector:CreateTab({
-		Name = self:FilterName(`Remote: {RemoteName}`, 50),
+		Name = self:FilterName(string.format("Remote: %s", RemoteName), 50),
 		Focused = TabFocused
 	})
 
@@ -982,7 +1023,7 @@ function Ui:SetFocusedRemote(Data)
 		end
 
 		--// Save file
-		local PathBase = `{Script} %s.txt`
+		local PathBase = string.format("%s %%s.txt", tostring(Script))
 		local FilePath = Generation:TimeStampFile(PathBase)
 		writefile(FilePath, Bytecode)
 
@@ -990,7 +1031,7 @@ function Ui:SetFocusedRemote(Data)
 	end
 	function Data:MakeScript(ScriptType: string)
 		local Script = Generation:RemoteScript(Module, self, ScriptType)
-		SetIDEText(Script, `Editing: {RemoteName}.lua`)
+		SetIDEText(Script, string.format("Editing: %s.lua", RemoteName))
 	end
 	function Data:RepeatCall()
 		local Signal = Hook:Index(Remote, Method)
@@ -1006,17 +1047,17 @@ function Ui:SetFocusedRemote(Data)
 
 		--// Error messages
 		if not IsRemoteFunction then
-			Ui:ShowModal({"The Remote is not a Remote Function (-9999999 AURA)"})
+			Ui:ShowModal({{"The Remote is not a Remote Function (-9999999 AURA)"}})
 			return
 		end
 		if not ReturnValues then
-			Ui:ShowModal({"No return values (-9999999 AURA)"})
+			Ui:ShowModal({{"No return values (-9999999 AURA)"}})
 			return
 		end
 
 		--// Generate script
 		local Script = Generation:TableScript(Module, ReturnValues)
-		SetIDEText(Script, `Return Values for: {RemoteName}`)
+		SetIDEText(Script, string.format("Return Values for: %s", RemoteName))
 	end
 	function Data:GenerateInfo()
 		--// Problem check
@@ -1024,7 +1065,7 @@ function Ui:SetFocusedRemote(Data)
 
 		--// Generate script
 		local Script = Generation:AdvancedInfo(Module, self)
-		SetIDEText(Script, `Advanced Info for: {RemoteName}`)
+		SetIDEText(Script, string.format("Advanced Info for: %s", RemoteName))
 	end
 	function Data:Decompile(WhichScript: string)
 		local DecompilePopout = Flags:GetFlagValue("DecompilePopout")
@@ -1033,7 +1074,7 @@ function Ui:SetFocusedRemote(Data)
 
 		--// Problem check
 		if not ScriptCheck(ToDecompile, true) then return end
-		local Task = Ui:FilterName(`Viewing: {ToDecompile}.lua`, 200)
+		local Task = Ui:FilterName(string.format("Viewing: %s.lua", tostring(ToDecompile)), 200)
 		
 		--// Automatically Pop-out the editor for decompiling if enabled
 		if DecompilePopout then
@@ -1118,7 +1159,7 @@ function Ui:SetFocusedRemote(Data)
 	--// Arguments table script
 	if TableArgs then
 		local Parsed = Generation:TableScript(Module, Args)
-		SetIDEText(Parsed, `Arguments for {RemoteName}`)
+		SetIDEText(Parsed, string.format("Arguments for %s", RemoteName))
 		return
 	end
 
@@ -1128,7 +1169,7 @@ end
 
 function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 	local Window = self:CreateWindow({
-		Title = `Connections for: {RemoteName}`,
+		Title = string.format("Connections for: %s", RemoteName),
 		Size = UDim2.fromOffset(450, 250)
 	})
 
@@ -1153,7 +1194,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 			Row:Button({
 				Text = "Decompile",
 				Callback = function()
-					local Task = self:FilterName(`Viewing: {Value}.lua`, 200)
+					local Task = self:FilterName(string.format("Viewing: %s.lua", tostring(Value)), 200)
 					local Editor = self:MakeEditorPopoutWindow(nil, {
 						Title = Task
 					})
@@ -1193,7 +1234,7 @@ function Ui:ViewConnections(RemoteName: string, Signal: RBXScriptConnection)
 			local Callback = ButtonsForValues[Property]
 
 			--// Value label
-			ColumnRow:Label({Text=`{Value}`})
+			ColumnRow:Label({Text=string.format("%s", Value)})
 
 			--// Add buttons
 			if Callback then
@@ -1214,7 +1255,7 @@ function Ui:GetRemoteHeader(Data: Log)
 	--// Remote info
 	local Id = Data.Id
 	local Remote = Data.Remote
-	local RemoteName = self:FilterName(`{Remote}`, 30)
+	local RemoteName = self:FilterName(string.format("%s", Remote), 30)
 
 	--// NoTreeNodes
 	local NoTreeNodes = Flags:GetFlagValue("NoTreeNodes")
@@ -1224,7 +1265,7 @@ function Ui:GetRemoteHeader(Data: Log)
 	if Existing then return Existing end
 
 	--// Header data
-	local HeaderData = {	
+	local HeaderData = { 	
 		LogCount = 0,
 		Data = Data,
 		Entries = {}
@@ -1307,10 +1348,12 @@ function Ui:ProcessLogQueue()
 	local Queue = self.LogQueue
     if #Queue <= 0 then return end
 
-	--// Create a log element for each in the Queue
-    for Index, Data in next, Queue do
-        self:CreateLog(Data)
-        table.remove(Queue, Index)
+	--// Process FIFO safely without mutating during ipairs
+    while #Queue > 0 do
+        local Data = table.remove(Queue, 1)
+        if Data then
+            self:CreateLog(Data)
+        end
     end
 end
 
@@ -1376,7 +1419,7 @@ function Ui:CreateLog(Data: Log)
 
 	--// Generate log title
 	local Color = Config.MethodColors[Method:lower()]
-	local Text = NoTreeNodes and `{Remote} | {Method}` or Method
+	local Text = NoTreeNodes and string.format("%s | %s", tostring(Remote), tostring(Method)) or Method
 
 	--// FindStringForName check
 	local FindString = Flags:GetFlagValue("FindStringForName")
@@ -1384,7 +1427,7 @@ function Ui:CreateLog(Data: Log)
 		for _, Arg in next, ClonedArgs do
 			if typeof(Arg) == "string" then
 				local Filtred = self:FilterName(Arg)
-				Text = `{Filtred} | {Text}`
+				Text = string.format("%s | %s", Filtred, Text)
 				break
 			end
 		end
